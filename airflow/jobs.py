@@ -897,6 +897,9 @@ class SchedulerJob(BaseJob):
                 return
 
             if next_run_date and period_end and period_end <= timezone.utcnow():
+                if not dag.upstream_deps_successful(next_run_date):
+                    return
+
                 next_run = dag.create_dagrun(
                     run_id=DagRun.ID_PREFIX + next_run_date.isoformat(),
                     execution_date=next_run_date,
