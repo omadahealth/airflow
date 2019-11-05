@@ -715,6 +715,71 @@ class DagTest(unittest.TestCase):
         self.assertIsNotNone(orm_dag.default_view)
         self.assertEqual(orm_dag.get_default_view(), "graph")
 
+    def test_upstream_deps_successful(self):
+        dag1 = DAG(dag_id='dag1', start_date=DEFAULT_DATE)
+        dag2 = DAG(dag_id='dag2', start_date=DEFAULT_DATE)
+        dag3 = DAG(dag_id='dag3', start_date=DEFAULT_DATE)
+        dag4 = DAG(dag_id='dag4', start_date=DEFAULT_DATE)
+        dag5 = DAG(dag_id='dag5', start_date=DEFAULT_DATE)
+        dag6 = DAG(dag_id='dag6', start_date=DEFAULT_DATE)
+
+        execution_date = timezone.utcnow()
+
+        dag1.create_dagrun(
+            run_id='manual__' + timezone.utcnow().isoformat(),
+            state=State.SUCCESS,
+            execution_date=execution_date
+        )
+
+        dag2.create_dagrun(
+            run_id='manual__' + timezone.utcnow().isoformat(),
+            state=State.FAILED,
+            execution_date=execution_date
+        )
+
+        dag3.create_dagrun(
+            run_id='manual__' + timezone.utcnow().isoformat(),
+            state=State.SUCCESS,
+            execution_date=None
+        )
+
+        dag4.create_dagrun(
+            run_id='manual__' + timezone.utcnow().isoformat(),
+            state=State.RUNNING,
+            execution_date=execution_date
+        )
+
+        # dag2 -> dag1
+        dag2.set_upstream_dag_id(dag1.dag_id)
+        self.assertEqual(dag2.upstream_deps_successful(execution_date), True)
+
+        # dag3 -> dag2
+        dag3.set_upstream_dag_id(dag2.dag_id)
+        self.assertEqual(dag3.upstream_deps_successful(execution_date), False)
+
+        # dag4 -> dag3
+        dag4.set_upstream_dag_id(dag3.dag_id)
+        self.assertEqual(dag4.upstream_deps_successful(execution_date), False)
+
+        # dag5 -> dag4
+        dag5.set_upstream_dag_id(dag4.dag_id)
+        self.assertEqual(dag5.upstream_deps_successful(execution_date), False)
+
+        # dag6
+        self.assertEqual(dag6.upstream_deps_successful(execution_date), True)
+
+    def test_set_upstream_dag_ids(self):
+        dag1 = DAG(dag_id='dag1', start_date=DEFAULT_DATE)
+        dag2 = DAG(dag_id='dag2', start_date=DEFAULT_DATE)
+        dag3 = DAG(dag_id='dag3', start_date=DEFAULT_DATE)
+
+        # dag2 -> dag1
+        dag2.set_upstream_dag_id(dag1.dag_id)
+        self.assertEqual(dag2.upstream_dag_ids, {'dag1'})
+
+        # dag3
+        self.assertEqual(dag3.upstream_dag_ids, set())
+
     @patch('airflow.models.dag.DagBag')
     def test_is_paused_subdag(self, mock_dag_bag):
         subdag_id = 'dag.subdag'

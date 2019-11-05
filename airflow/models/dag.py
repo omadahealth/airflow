@@ -29,7 +29,7 @@ import traceback
 import warnings
 from collections import OrderedDict, defaultdict
 from datetime import timedelta, datetime
-from typing import Union, Optional, Iterable, Dict, Type, Callable, List, TYPE_CHECKING
+from typing import Union, Optional, Iterable, Dict, Type, Callable, List, Set, TYPE_CHECKING
 
 import jinja2
 import pendulum
@@ -319,6 +319,8 @@ class DAG(BaseDag, LoggingMixin):
         self.is_paused_upon_creation = is_paused_upon_creation
 
         self.jinja_environment_kwargs = jinja_environment_kwargs
+
+        self.upstream_dag_ids = set()  # type: Set[str]
 
     def __repr__(self):
         return "<DAG: {self.dag_id}>".format(self=self)
@@ -1340,6 +1342,18 @@ class DAG(BaseDag, LoggingMixin):
         run.refresh_from_db()
 
         return run
+
+    @provide_session
+    def upstream_deps_successful(self, execution_date, session=None):
+        count = session.query(DagRun).filter(
+            DagRun.dag_id.in_(self.upstream_dag_ids),
+            DagRun.state == State.SUCCESS,
+            DagRun.execution_date == execution_date,
+        ).count()
+        return count == len(self.upstream_dag_ids)
+
+    def set_upstream_dag_id(self, dag_id):
+        self.upstream_dag_ids.add(dag_id)
 
     @provide_session
     def sync_to_db(self, owner=None, sync_time=None, session=None):

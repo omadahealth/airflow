@@ -2717,3 +2717,24 @@ class SchedulerJobTest(unittest.TestCase):
             self.assertEqual(state, ti.state)
 
         session.close()
+
+    def test_scheduler_does_not_create_dag_run_if_upstream_deps_are_not_successful(self):
+        session = settings.Session()
+
+        dag1 = DAG(dag_id='dag1', start_date=DEFAULT_DATE)
+        dag1.create_dagrun(
+            run_id='manual__' + timezone.utcnow().isoformat(),
+            state=State.FAILED,
+            execution_date=DEFAULT_DATE,
+            session=session
+        )
+
+        session.commit()
+        session.close()
+
+        dag2 = DAG(dag_id='dag2', start_date=DEFAULT_DATE)
+        dag2.set_upstream_dag_id(dag1.dag_id)
+
+        scheduler = SchedulerJob()
+
+        self.assertIsNone(scheduler.create_dag_run(dag2))
