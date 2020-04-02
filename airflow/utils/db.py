@@ -175,7 +175,7 @@ def initdb(rbac=False):
     merge_conn(
         Connection(
             conn_id='http_default', conn_type='http',
-            host='https://www.google.com/'))
+            host='https://www.httpbin.org/'))
     merge_conn(
         Connection(
             conn_id='mssql_default', conn_type='mssql',
@@ -382,6 +382,11 @@ def resetdb(rbac):
     Clear out the database
     """
     from airflow import models
+    # We need to add this model manually to get reset working well
+    # noinspection PyUnresolvedReferences
+    from airflow.models.serialized_dag import SerializedDagModel  # noqa: F401
+    # noinspection PyUnresolvedReferences
+    from airflow.jobs.base_job import BaseJob  # noqa: F401
 
     # alembic adds significant import time, so we import it lazily
     from alembic.migration import MigrationContext
@@ -403,3 +408,13 @@ def resetdb(rbac):
     Base.metadata.drop_all(connection)
 
     initdb(rbac)
+
+
+@provide_session
+def checkdb(session=None):
+    """
+    Checks if the database works.
+    :param session: session of the sqlalchemy
+    """
+    session.execute('select 1 as is_alive;')
+    log.info("Connection successful.")

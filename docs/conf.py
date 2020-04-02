@@ -37,6 +37,13 @@ import sys
 from typing import Dict
 
 import airflow
+from airflow.configuration import default_config_yaml
+
+try:
+    import sphinx_airflow_theme  # pylint: disable=unused-import
+    airflow_theme_is_available = True
+except ImportError:
+    airflow_theme_is_available = False
 
 autodoc_mock_imports = [
     'MySQLdb',
@@ -119,15 +126,21 @@ extensions = [
     'sphinx.ext.graphviz',
     'sphinxarg.ext',
     'sphinxcontrib.httpdomain',
+    'sphinxcontrib.jinja',
     'sphinx.ext.intersphinx',
     'autoapi.extension',
     'exampleinclude',
-    'docroles'
+    'docroles',
+    'removemarktransform',
 ]
 
 autodoc_default_options = {
     'show-inheritance': True,
     'members': True
+}
+
+jinja_contexts = {
+    'config_ctx': {"configs": default_config_yaml()}
 }
 
 viewcode_follow_imported_members = True
@@ -195,6 +208,7 @@ exclude_patterns = [
     '_api/airflow/migrations',
     '_api/airflow/plugins_manager',
     '_api/airflow/security',
+    '_api/airflow/serialization',
     '_api/airflow/settings',
     '_api/airflow/sentry',
     '_api/airflow/stats',
@@ -272,6 +286,9 @@ intersphinx_mapping = {
 # a list of builtin themes.
 html_theme = 'sphinx_rtd_theme'
 
+if airflow_theme_is_available:
+    html_theme = 'sphinx_airflow_theme'
+
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
@@ -299,12 +316,18 @@ html_favicon = "../airflow/www/static/pin_32.png"
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-# html_static_path = ['_static']
+html_static_path = ['static']
 
 # Add any extra paths that contain custom files (such as robots.txt or
 # .htaccess) here, relative to this directory. These files are copied
 # directly to the root of the documentation.
 # html_extra_path = []
+
+# A list of JavaScript filename. The entry must be a filename string or a
+# tuple containing the filename string and the attributes dictionary. The
+# filename must be relative to the html_static_path, or a full URI with
+# scheme like http://example.org/script.js.
+html_js_files = ['jira-links.js']
 
 # If not '', a 'Last updated on:' timestamp is inserted at every page bottom,
 # using the given strftime format.
@@ -315,7 +338,14 @@ html_favicon = "../airflow/www/static/pin_32.png"
 # html_use_smartypants = True
 
 # Custom sidebar templates, maps document names to template names.
-# html_sidebars = {}
+if airflow_theme_is_available:
+    html_sidebars = {
+        '**': [
+            'version-selector.html',
+            'searchbox.html',
+            'globaltoc.html',
+        ]
+    }
 
 # Additional templates that should be rendered to pages, maps page names to
 # template names.
@@ -462,3 +492,29 @@ autoapi_root = '_api'
 
 # -- Options for examole include ------------------------------------------
 exampleinclude_sourceroot = os.path.abspath('..')
+
+# -- Additional HTML Context variable
+html_context = {
+    # Google Analytics ID.
+    # For more information look at:
+    # https://github.com/readthedocs/sphinx_rtd_theme/blob/master/sphinx_rtd_theme/layout.html#L222-L232
+    'theme_analytics_id': 'UA-140539454-1',
+    # Variables used to build a button for editing the source code
+    #
+    # The path is created according to the following template:
+    #
+    # https://{{ github_host|default("github.com") }}/{{ github_user }}/{{ github_repo }}/
+    # {{ theme_vcs_pageview_mode|default("blob") }}/{{ github_version }}{{ conf_py_path }}
+    # {{ pagename }}{{ suffix }}
+    #
+    # More information:
+    # https://github.com/readthedocs/readthedocs.org/blob/master/readthedocs/doc_builder/templates/doc_builder/conf.py.tmpl#L100-L103
+    # https://github.com/readthedocs/sphinx_rtd_theme/blob/master/sphinx_rtd_theme/breadcrumbs.html#L45
+    #
+    'theme_vcs_pageview_mode': 'edit',
+    'conf_py_path': '/docs/',
+    'github_user': 'apache',
+    'github_repo': 'airflow',
+    'github_version': os.environ.get('GITHUB_TREE', None),
+    'display_github': os.environ.get('GITHUB_TREE', None) is not None,
+}

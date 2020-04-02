@@ -27,9 +27,10 @@ import warnings
 
 from abc import ABCMeta, abstractmethod
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Type
+from typing import Any, Callable, ClassVar, Dict, FrozenSet, Iterable, List, Optional, Set, Type, Union
 
 
+import attr
 from cached_property import cached_property
 
 import jinja2
@@ -81,6 +82,16 @@ class BaseOperator(LoggingMixin):
     :type task_id: str
     :param owner: the owner of the task, using the unix username is recommended
     :type owner: str
+    :param email: the 'to' email address(es) used in email alerts. This can be a
+        single email or multiple ones. Multiple addresses can be specified as a
+        comma or semi-colon separated string or by passing a list of strings.
+    :type email: str or list[str]
+    :param email_on_retry: Indicates whether email alerts should be sent when a
+        task is retried
+    :type email_on_retry: bool
+    :param email_on_failure: Indicates whether email alerts should be sent when
+        a task failed
+    :type email_on_failure: bool
     :param retries: the number of retries that should be performed before
         failing the task
     :type retries: int
@@ -120,7 +131,9 @@ class BaseOperator(LoggingMixin):
         of task X to finish successfully before it runs. This is useful if the
         different instances of a task X alter the same asset, and this asset
         is used by tasks downstream of task X. Note that depends_on_past
-        is forced to True wherever wait_for_downstream is used.
+        is forced to True wherever wait_for_downstream is used. Also note that
+        only tasks *immediately* downstream of the previous task instance are waited
+        for; the statuses of any tasks further downstream are ignored.
     :type wait_for_downstream: bool
     :param queue: which queue to target when running this job. Not
         all executors implement queue management, the CeleryExecutor
@@ -156,6 +169,8 @@ class BaseOperator(LoggingMixin):
         DAGS. Options can be set as string or using the constants defined in
         the static class ``airflow.utils.WeightRule``
     :type weight_rule: str
+    :param queue: specifies which task queue to use
+    :type queue: str
     :param pool: the slot pool this task should run in, slot pools are a
         way to limit concurrency for certain tasks
     :type pool: str
@@ -230,6 +245,8 @@ class BaseOperator(LoggingMixin):
     ui_color = '#fff'  # type str
     ui_fgcolor = '#000'  # type str
 
+    pool = ""  # type: str
+
     # base list which includes all the attrs that don't need deep copy.
     _base_operator_shallow_copy_attrs = ('user_defined_macros',
                                          'user_defined_filters',
@@ -240,7 +257,10 @@ class BaseOperator(LoggingMixin):
     shallow_copy_attrs = ()  # type: Iterable[str]
 
     # Defines the operator level extra links
-    operator_extra_links = ()  # type: Iterable[BaseOperatorLink]
+    operator_extra_links = ()  # type: Iterable['BaseOperatorLink']
+
+    # The _serialized_fields are lazily loaded when get_serialized_fields() method is called
+    __serialized_fields = None  # type: Optional[FrozenSet[str]]
 
     _comps = {
         'task_id',
@@ -269,7 +289,7 @@ class BaseOperator(LoggingMixin):
         self,
         task_id,  # type: str
         owner=conf.get('operators', 'DEFAULT_OWNER'),  # type: str
-        email=None,  # type: Optional[str]
+        email=None,  # type: Optional[Union[str, Iterable[str]]]
         email_on_retry=True,  # type: bool
         email_on_failure=True,  # type: bool
         retries=conf.getint('core', 'default_task_retries', fallback=0),  # type: int
@@ -380,7 +400,7 @@ class BaseOperator(LoggingMixin):
                         d=dag.dag_id if dag else "", t=task_id, tr=weight_rule))
         self.weight_rule = weight_rule
 
-        self.resources = Resources(*resources) if resources is not None else None
+        self.resources = Resources(**resources) if resources is not None else None
         self.run_as_user = run_as_user
         self.task_concurrency = task_concurrency
         self.executor_config = executor_config or {}
@@ -394,6 +414,10 @@ class BaseOperator(LoggingMixin):
             dag = settings.CONTEXT_MANAGER_DAG
         if dag:
             self.dag = dag
+
+        # subdag parameter is only set for SubDagOperator.
+        # Setting it to None by default as other Operators do not have that field
+        self.subdag = None   # type: Optional[DAG]
 
         self._log = logging.getLogger("airflow.task.operators")
 
@@ -612,7 +636,6 @@ class BaseOperator(LoggingMixin):
         """
         This hook is triggered right before self.execute() is called.
         """
-        pass
 
     def execute(self, context):
         """
@@ -630,7 +653,6 @@ class BaseOperator(LoggingMixin):
         It is passed the execution context and any results returned by the
         operator.
         """
-        pass
 
     def on_kill(self):
         """
@@ -639,7 +661,6 @@ class BaseOperator(LoggingMixin):
         module within an operator needs to be cleaned up or it will leave
         ghost processes behind.
         """
-        pass
 
     def __deepcopy__(self, memo):
         """
@@ -771,20 +792,19 @@ class BaseOperator(LoggingMixin):
         content of the file before the template is rendered,
         it should override this method to do so.
         """
-        pass
 
     def resolve_template_files(self):
         # Getting the content of files for template_field / template_ext
         if self.template_ext:
-            for attr in self.template_fields:
-                content = getattr(self, attr, None)
+            for field in self.template_fields:
+                content = getattr(self, field, None)
                 if content is None:
                     continue
                 elif isinstance(content, six.string_types) and \
                         any([content.endswith(ext) for ext in self.template_ext]):
                     env = self.get_template_env()
                     try:
-                        setattr(self, attr, env.loader.get_source(env, content)[0])
+                        setattr(self, field, env.loader.get_source(env, content)[0])
                     except Exception as e:
                         self.log.exception(e)
                 elif isinstance(content, list):
@@ -920,10 +940,10 @@ class BaseOperator(LoggingMixin):
     def dry_run(self):
         """Performs dry run for the operator - just render template fields."""
         self.log.info('Dry run')
-        for attr in self.template_fields:
-            content = getattr(self, attr)
+        for field in self.template_fields:
+            content = getattr(self, field)
             if content and isinstance(content, six.string_types):
-                self.log.info('Rendering template for %s', attr)
+                self.log.info('Rendering template for %s', field)
                 self.log.info(content)
 
     def get_direct_relative_ids(self, upstream=False):
@@ -1061,11 +1081,12 @@ class BaseOperator(LoggingMixin):
         """
         For an operator, gets the URL that the external links specified in
         `extra_links` should point to.
+
         :raise ValueError: The error message of a ValueError will be passed on through to
-        the fronted to show up as a tooltip on the disabled link
+            the fronted to show up as a tooltip on the disabled link
         :param dttm: The datetime parsed execution date for the URL being searched for
         :param link_name: The name of the link we're looking for the URL for. Should be
-        one of the options specified in `extra_links`
+            one of the options specified in `extra_links`
         :return: A URL
         """
         if link_name in self.operator_extra_link_dict:
@@ -1075,7 +1096,18 @@ class BaseOperator(LoggingMixin):
         else:
             return None
 
+    @classmethod
+    def get_serialized_fields(cls):
+        """Stringified DAGs and operators contain exactly these fields."""
+        if not cls.__serialized_fields:
+            cls.__serialized_fields = frozenset(
+                set(vars(BaseOperator(task_id='test')).keys()) - {
+                    'inlets', 'outlets', '_upstream_task_ids', 'default_args', 'dag', '_dag'
+                } | {'_task_type', 'subdag', 'ui_color', 'ui_fgcolor', 'template_fields'})
+        return cls.__serialized_fields
 
+
+@attr.s(auto_attribs=True)
 class BaseOperatorLink:
     """
     Abstract base class that defines how we get an operator link.
@@ -1083,7 +1115,7 @@ class BaseOperatorLink:
 
     __metaclass__ = ABCMeta
 
-    operators = []   # type: List[Type[BaseOperator]]
+    operators = []   # type: ClassVar[List[Type[BaseOperator]]]
     """
     This property will be used by Airflow Plugins to find the Operators to which you want
     to assign this Operator Link
@@ -1100,7 +1132,6 @@ class BaseOperatorLink:
 
         :return: link name
         """
-        pass
 
     @abstractmethod
     def get_link(self, operator, dttm):
@@ -1112,4 +1143,3 @@ class BaseOperatorLink:
         :param dttm: datetime
         :return: link to external system
         """
-        pass

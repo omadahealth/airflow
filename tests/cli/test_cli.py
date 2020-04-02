@@ -30,6 +30,7 @@ from time import sleep
 import psutil
 import pytz
 import subprocess
+import pytest
 from argparse import Namespace
 from airflow import settings
 import airflow.bin.cli as cli
@@ -216,14 +217,13 @@ class TestCLI(unittest.TestCase):
 
         reset(args.dag_id)
 
-        with patch('argparse.Namespace', args) as mock_args:
-            run(mock_args)
-            dag = get_dag(mock_args)
-            task = dag.get_task(task_id=args.task_id)
-            ti = TaskInstance(task, args.execution_date)
-            ti.refresh_from_db()
-            state = ti.current_state()
-            self.assertEqual(state, State.SUCCESS)
+        run(args)
+        dag = get_dag(args)
+        task = dag.get_task(task_id=args.task_id)
+        ti = TaskInstance(task, args.execution_date)
+        ti.refresh_from_db()
+        state = ti.current_state()
+        self.assertEqual(state, State.SUCCESS)
 
     def test_test(self):
         """Test the `airflow test` command"""
@@ -520,4 +520,76 @@ class TestCLI(unittest.TestCase):
             ignore_ti_state=False,
             pickle_id=None,
             pool=None,
+        )
+
+
+@pytest.mark.integration("redis")
+@pytest.mark.integration("rabbitmq")
+class TestWorkerServeLogs(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.parser = cli.CLIFactory.get_parser()
+
+    @mock.patch('celery.bin.worker.worker')
+    def test_serve_logs_on_worker_start(self, celery_mock):
+        with patch('airflow.bin.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value.communicate.return_value = (b'output', b'error')
+            mock_popen.return_value.returncode = 0
+            args = self.parser.parse_args(['worker', '-c', '-1'])
+
+            with patch('celery.platforms.check_privileges') as mock_privil:
+                mock_privil.return_value = 0
+                cli.worker(args)
+                mock_popen.assert_called()
+
+    @mock.patch('celery.bin.worker.worker')
+    def test_skip_serve_logs_on_worker_start(self, celery_mock):
+        with patch('airflow.bin.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value.communicate.return_value = (b'output', b'error')
+            mock_popen.return_value.returncode = 0
+            args = self.parser.parse_args(['worker', '-c', '-1', '-s'])
+
+            with patch('celery.platforms.check_privileges') as mock_privil:
+                mock_privil.return_value = 0
+                cli.worker(args)
+                mock_popen.assert_not_called()
+
+
+class TestWorkerStart(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.parser = cli.CLIFactory.get_parser()
+
+    @mock.patch('airflow.bin.cli.setup_logging')
+    @mock.patch('celery.bin.worker.worker')
+    def test_worker_started_with_required_arguments(self, mock_worker, setup_logging_mock):
+        concurrency = '1'
+        celery_hostname = "celery_hostname"
+        queues = "queue"
+        autoscale = "2,5"
+        args = self.parser.parse_args([
+            'worker',
+            '--autoscale',
+            autoscale,
+            '--concurrency',
+            concurrency,
+            '--celery_hostname',
+            celery_hostname,
+            '--queues',
+            queues
+        ])
+
+        with mock.patch('celery.platforms.check_privileges') as mock_privil:
+            mock_privil.return_value = 0
+            cli.worker(args)
+
+        mock_worker.return_value.run.assert_called_once_with(
+            pool='prefork',
+            optimization='fair',
+            O='fair',  # noqa
+            queues=queues,
+            concurrency=int(concurrency),
+            autoscale=autoscale,
+            hostname=celery_hostname,
+            loglevel=mock.ANY,
         )

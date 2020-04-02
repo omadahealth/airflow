@@ -227,7 +227,7 @@ class HiveCliHook(BaseHook):
                          'mapred.job.queue.name={}'
                          .format(self.mapred_queue),
                          '-hiveconf',
-                         'tez.job.queue.name={}'
+                         'tez.queue.name={}'
                          .format(self.mapred_queue)
                          ])
 
@@ -455,9 +455,9 @@ class HiveCliHook(BaseHook):
                 tprops = ", ".join(
                     ["'{0}'='{1}'".format(k, v) for k, v in tblproperties.items()])
                 hql += "TBLPROPERTIES({tprops})\n".format(tprops=tprops)
-        hql += ";"
-        self.log.info(hql)
-        self.run_cli(hql)
+            hql += ";"
+            self.log.info(hql)
+            self.run_cli(hql)
         hql = "LOAD DATA LOCAL INPATH '{filepath}' ".format(filepath=filepath)
         if overwrite:
             hql += "OVERWRITE "

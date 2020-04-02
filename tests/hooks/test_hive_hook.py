@@ -128,7 +128,7 @@ class TestHiveCliHook(unittest.TestCase):
         del os.environ[dag_run_id_ctx_var_name]
 
     @mock.patch('airflow.hooks.hive_hooks.HiveCliHook.run_cli')
-    def test_load_file(self, mock_run_cli):
+    def test_load_file_without_create_table(self, mock_run_cli):
         filepath = "/path/to/input/file"
         table = "output_table"
 
@@ -140,7 +140,40 @@ class TestHiveCliHook(unittest.TestCase):
             "OVERWRITE INTO TABLE {table} ;\n"
             .format(filepath=filepath, table=table)
         )
-        mock_run_cli.assert_called_with(query)
+
+        calls = [
+            mock.call(query)
+        ]
+        mock_run_cli.assert_has_calls(calls, any_order=True)
+
+    @mock.patch('airflow.hooks.hive_hooks.HiveCliHook.run_cli')
+    def test_load_file_create_table(self, mock_run_cli):
+        filepath = "/path/to/input/file"
+        table = "output_table"
+        field_dict = OrderedDict([("name", "string"), ("gender", "string")])
+        fields = ",\n    ".join([k + ' ' + v for k, v in field_dict.items()])
+
+        hook = HiveCliHook()
+        hook.load_file(filepath=filepath, table=table, field_dict=field_dict, create=True, recreate=True)
+
+        create_table = (
+            "DROP TABLE IF EXISTS {table};\n"
+            "CREATE TABLE IF NOT EXISTS {table} (\n{fields})\n"
+            "ROW FORMAT DELIMITED\n"
+            "FIELDS TERMINATED BY ','\n"
+            "STORED AS textfile\n;".format(table=table, fields=fields)
+        )
+
+        load_data = (
+            "LOAD DATA LOCAL INPATH '{filepath}' "
+            "OVERWRITE INTO TABLE {table} ;\n"
+            .format(filepath=filepath, table=table)
+        )
+        calls = [
+            mock.call(create_table),
+            mock.call(load_data)
+        ]
+        mock_run_cli.assert_has_calls(calls, any_order=True)
 
     @mock.patch('airflow.hooks.hive_hooks.HiveCliHook.load_file')
     @mock.patch('pandas.DataFrame.to_csv')
@@ -440,15 +473,12 @@ class TestHiveServer2Hook(unittest.TestCase):
         hook = HiveServer2Hook()
         query = "SELECT * FROM {}".format(self.table)
         csv_filepath = 'query_results.csv'
-        with self.assertLogs() as cm:
-            hook.to_csv(query, csv_filepath, schema=self.database,
-                        delimiter=',', lineterminator='\n', output_header=True, fetch_size=2)
-            df = pd.read_csv(csv_filepath, sep=',')
-            self.assertListEqual(df.columns.tolist(), self.columns)
-            self.assertListEqual(df[self.columns[0]].values.tolist(), [1, 2])
-            self.assertEqual(len(df), 2)
-            self.assertIn('INFO:airflow.hooks.hive_hooks.HiveServer2Hook:'
-                          'Written 2 rows so far.', cm.output)
+        hook.to_csv(query, csv_filepath, schema=self.database,
+                    delimiter=',', lineterminator='\n', output_header=True, fetch_size=2)
+        df = pd.read_csv(csv_filepath, sep=',')
+        self.assertListEqual(df.columns.tolist(), self.columns)
+        self.assertListEqual(df[self.columns[0]].values.tolist(), [1, 2])
+        self.assertEqual(len(df), 2)
 
     @unittest.skipIf(NOT_ASSERTLOGS_VERSION >= 3.4, 'test could cover by test_to_csv_assertLogs')
     def test_to_csv_without_assertlogs(self):
@@ -489,23 +519,21 @@ class TestHiveServer2Hook(unittest.TestCase):
         dag_run_id_ctx_var_name = \
             AIRFLOW_VAR_NAME_FORMAT_MAPPING['AIRFLOW_CONTEXT_DAG_RUN_ID'][
                 'env_var_format']
-        os.environ[dag_id_ctx_var_name] = 'test_dag_id'
-        os.environ[task_id_ctx_var_name] = 'test_task_id'
-        os.environ[execution_date_ctx_var_name] = 'test_execution_date'
-        os.environ[dag_run_id_ctx_var_name] = 'test_dag_run_id'
 
-        hook = HiveServer2Hook()
-        output = '\n'.join(res_tuple[0]
-                           for res_tuple
-                           in hook.get_results(hql=hql,
-                                               hive_conf={'key': 'value'})['data'])
+        with mock.patch.dict('os.environ', {
+            dag_id_ctx_var_name: 'test_dag_id',
+            task_id_ctx_var_name: 'test_task_id',
+            execution_date_ctx_var_name: 'test_execution_date',
+            dag_run_id_ctx_var_name: 'test_dag_run_id',
+
+        }):
+            hook = HiveServer2Hook()
+            output = '\n'.join(res_tuple[0]
+                               for res_tuple
+                               in hook.get_results(hql=hql,
+                                                   hive_conf={'key': 'value'})['data'])
         self.assertIn('value', output)
         self.assertIn('test_dag_id', output)
         self.assertIn('test_task_id', output)
         self.assertIn('test_execution_date', output)
         self.assertIn('test_dag_run_id', output)
-
-        del os.environ[dag_id_ctx_var_name]
-        del os.environ[task_id_ctx_var_name]
-        del os.environ[execution_date_ctx_var_name]
-        del os.environ[dag_run_id_ctx_var_name]

@@ -19,23 +19,17 @@
 #
 
 import unittest
-import warnings
 from typing import List
 
-from google.auth.exceptions import GoogleAuthError
-import mock
+from tests.compat import mock
 from googleapiclient.errors import HttpError
 
 from airflow.contrib.hooks import bigquery_hook as hook
 from airflow.contrib.hooks.bigquery_hook import _cleanse_time_partitioning, \
-    _validate_value, _api_resource_configs_duplication_check
+    _validate_value, _api_resource_configs_duplication_check, \
+    _validate_src_fmt_configs
 
 bq_available = True
-
-try:
-    hook.BigQueryHook().get_service()
-except GoogleAuthError:
-    bq_available = False
 
 
 class TestPandasGbqPrivateKey(unittest.TestCase):
@@ -71,30 +65,30 @@ class TestBigQueryDataframeResults(unittest.TestCase):
     def setUp(self):
         self.instance = hook.BigQueryHook()
 
-    @unittest.skipIf(not bq_available, 'BQ is not available to run tests')
+    @unittest.skip('SYSTEM TEST, BQ is not available to run tests')
     def test_output_is_dataframe_with_valid_query(self):
         import pandas as pd
         df = self.instance.get_pandas_df('select 1')
         self.assertIsInstance(df, pd.DataFrame)
 
-    @unittest.skipIf(not bq_available, 'BQ is not available to run tests')
+    @unittest.skip('SYSTEM TEST, BQ is not available to run tests')
     def test_throws_exception_with_invalid_query(self):
         with self.assertRaises(Exception) as context:
             self.instance.get_pandas_df('from `1`')
         self.assertIn('Reason: ', str(context.exception), "")
 
-    @unittest.skipIf(not bq_available, 'BQ is not available to run tests')
+    @unittest.skip('SYSTEM TEST, BQ is not available to run tests')
     def test_succeeds_with_explicit_legacy_query(self):
         df = self.instance.get_pandas_df('select 1', dialect='legacy')
         self.assertEqual(df.iloc(0)[0][0], 1)
 
-    @unittest.skipIf(not bq_available, 'BQ is not available to run tests')
+    @unittest.skip('SYSTEM TEST, BQ is not available to run tests')
     def test_succeeds_with_explicit_std_query(self):
         df = self.instance.get_pandas_df(
             'select * except(b) from (select 1 a, 2 b)', dialect='standard')
         self.assertEqual(df.iloc(0)[0][0], 1)
 
-    @unittest.skipIf(not bq_available, 'BQ is not available to run tests')
+    @unittest.skip('SYSTEM TEST, BQ is not available to run tests')
     def test_throws_exception_with_incompatible_syntax(self):
         with self.assertRaises(Exception) as context:
             self.instance.get_pandas_df(
@@ -239,14 +233,13 @@ def mock_job_cancel(projectId, jobId):
 
 class TestBigQueryBaseCursor(unittest.TestCase):
     def test_bql_deprecation_warning(self):
-        with warnings.catch_warnings(record=True) as w:
+        with self.assertWarns(DeprecationWarning) as cm:
             hook.BigQueryBaseCursor("test", "test").run_query(
                 bql='select * from test_table'
             )
             yield
-        self.assertIn(
-            'Deprecated parameter `bql`',
-            w[0].message.args[0])
+        warning = cm.warning
+        assert 'Deprecated parameter `bql`' == warning.args[0]
 
     def test_invalid_schema_update_options(self):
         with self.assertRaises(Exception) as context:
@@ -365,6 +358,28 @@ class TestBigQueryBaseCursor(unittest.TestCase):
                 "key_one", key_one, {"key_one": False})
         self.assertIsNone(_api_resource_configs_duplication_check(
             "key_one", key_one, {"key_one": True}))
+
+    def test_validate_src_fmt_configs(self):
+        source_format = "test_format"
+        valid_configs = ["test_config_known", "compatibility_val"]
+        backward_compatibility_configs = {"compatibility_val": "val"}
+
+        with self.assertRaises(ValueError):
+            # This config should raise a value error.
+            src_fmt_configs = {"test_config_unknown": "val"}
+            _validate_src_fmt_configs(source_format,
+                                      src_fmt_configs,
+                                      valid_configs,
+                                      backward_compatibility_configs)
+
+        src_fmt_configs = {"test_config_known": "val"}
+        src_fmt_configs = _validate_src_fmt_configs(source_format, src_fmt_configs, valid_configs,
+                                                    backward_compatibility_configs)
+        assert "test_config_known" in src_fmt_configs, \
+            "src_fmt_configs should contain al known src_fmt_configs"
+
+        assert "compatibility_val" in src_fmt_configs, \
+            "_validate_src_fmt_configs should add backward_compatibility config"
 
 
 class TestTableDataOperations(unittest.TestCase):
@@ -620,6 +635,25 @@ class TestBigQueryCursor(unittest.TestCase):
         hook.BigQueryCursor("test", "test").execute(
             "SELECT %(foo)s", {"foo": "bar"})
         assert mocked_rwc.call_count == 1
+
+    @mock.patch.object(hook.BigQueryBaseCursor, 'run_with_configuration')
+    @mock.patch.object(hook.BigQueryCursor, 'flush_results')
+    def test_flush_cursor_in_execute(self, _, mocked_fr):
+        hook.BigQueryCursor("test", "test").execute(
+            "SELECT %(foo)s", {"foo": "bar"})
+        assert mocked_fr.call_count == 1
+
+    def test_flush_cursor(self):
+        bq_cursor = hook.BigQueryCursor("test", "test")
+        bq_cursor.page_token = '456dcea9-fcbf-4f02-b570-83f5297c685e'
+        bq_cursor.job_id = 'c0a79ae4-0e72-4593-a0d0-7dbbf726f193'
+        bq_cursor.all_pages_loaded = True
+        bq_cursor.buffer = [('a', 100, 200), ('b', 200, 300)]
+        bq_cursor.flush_results()
+        self.assertIsNone(bq_cursor.page_token)
+        self.assertIsNone(bq_cursor.job_id)
+        self.assertFalse(bq_cursor.all_pages_loaded)
+        self.assertListEqual(bq_cursor.buffer, [])
 
 
 class TestLabelsInRunJob(unittest.TestCase):
@@ -1087,6 +1121,7 @@ class TestBigQueryWithKMS(unittest.TestCase):
             projectId=project_id, datasetId=dataset_id, body=body
         )
 
+    # pylint: disable=too-many-locals
     def test_create_external_table_with_kms(self):
         project_id = "bq-project"
         dataset_id = "bq_dataset"
@@ -1105,6 +1140,7 @@ class TestBigQueryWithKMS(unittest.TestCase):
         quote_character = None
         allow_quoted_newlines = False
         allow_jagged_rows = False
+        encoding = "UTF-8"
         labels = {'label1': 'test1', 'label2': 'test2'}
         schema_fields = [
             {"name": "id", "type": "STRING", "mode": "REQUIRED"}
@@ -1129,6 +1165,7 @@ class TestBigQueryWithKMS(unittest.TestCase):
             field_delimiter=field_delimiter,
             quote_character=quote_character,
             allow_jagged_rows=allow_jagged_rows,
+            encoding=encoding,
             allow_quoted_newlines=allow_quoted_newlines,
             labels=labels,
             schema_fields=schema_fields,
@@ -1149,7 +1186,8 @@ class TestBigQueryWithKMS(unittest.TestCase):
                     'fieldDelimiter': field_delimiter,
                     'quote': quote_character,
                     'allowQuotedNewlines': allow_quoted_newlines,
-                    'allowJaggedRows': allow_jagged_rows
+                    'allowJaggedRows': allow_jagged_rows,
+                    'encoding': encoding
                 }
             },
             'tableReference': {

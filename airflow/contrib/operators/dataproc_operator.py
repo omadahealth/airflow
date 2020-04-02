@@ -105,6 +105,9 @@ class DataprocClusterCreateOperator(DataprocOperationBaseOperator):
     :param custom_image: custom Dataproc image for more info see
         https://cloud.google.com/dataproc/docs/guides/dataproc-images
     :type custom_image: str
+    :param custom_image_project_id: project id for the custom Dataproc image, for more info see
+        https://cloud.google.com/dataproc/docs/guides/dataproc-images
+    :type custom_image_project_id: str
     :param autoscaling_policy: The autoscaling policy used by the cluster. Only resource names
         including projectid and location (region) are valid. Example:
         ``projects/[projectId]/locations/[dataproc_region]/autoscalingPolicies/[policy_id]``
@@ -113,6 +116,9 @@ class DataprocClusterCreateOperator(DataprocOperationBaseOperator):
         config files (e.g. spark-defaults.conf), see
         https://cloud.google.com/dataproc/docs/reference/rest/v1/projects.regions.clusters#SoftwareConfig
     :type properties: dict
+    :param optional_components: List of optional cluster components, for more info see
+        https://cloud.google.com/dataproc/docs/reference/rest/v1/ClusterConfig#Component
+    :type optional_components: list[str]
     :param num_masters: The # of master nodes to spin up
     :type num_masters: int
     :param master_machine_type: Compute engine machine type to use for the master node
@@ -196,9 +202,11 @@ class DataprocClusterCreateOperator(DataprocOperationBaseOperator):
                  init_action_timeout="10m",
                  metadata=None,
                  custom_image=None,
+                 custom_image_project_id=None,
                  image_version=None,
                  autoscaling_policy=None,
                  properties=None,
+                 optional_components=None,
                  num_masters=1,
                  master_machine_type='n1-standard-4',
                  master_disk_type='pd-standard',
@@ -229,8 +237,10 @@ class DataprocClusterCreateOperator(DataprocOperationBaseOperator):
         self.init_action_timeout = init_action_timeout
         self.metadata = metadata
         self.custom_image = custom_image
+        self.custom_image_project_id = custom_image_project_id
         self.image_version = image_version
         self.properties = properties or dict()
+        self.optional_components = optional_components
         self.master_machine_type = master_machine_type
         self.master_disk_type = master_disk_type
         self.master_disk_size = master_disk_size
@@ -392,8 +402,9 @@ class DataprocClusterCreateOperator(DataprocOperationBaseOperator):
             cluster_data['config']['softwareConfig']['imageVersion'] = self.image_version
 
         elif self.custom_image:
+            project_id = self.custom_image_project_id if (self.custom_image_project_id) else self.project_id
             custom_image_url = 'https://www.googleapis.com/compute/beta/projects/' \
-                               '{}/global/images/{}'.format(self.project_id,
+                               '{}/global/images/{}'.format(project_id,
                                                             self.custom_image)
             cluster_data['config']['masterConfig']['imageUri'] = custom_image_url
             if not self.single_node:
@@ -406,6 +417,9 @@ class DataprocClusterCreateOperator(DataprocOperationBaseOperator):
 
         if self.properties:
             cluster_data['config']['softwareConfig']['properties'] = self.properties
+
+        if self.optional_components:
+            cluster_data['config']['softwareConfig']['optionalComponents'] = self.optional_components
 
         cluster_data = self._build_lifecycle_config(cluster_data)
 

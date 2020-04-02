@@ -25,7 +25,7 @@ function assert_in_container() {
         echo >&2 "You are not inside the Airflow docker container!"
         echo >&2 "You should only run this script in the Airflow docker container as it may override your files."
         echo >&2 "Learn more about how we develop and test airflow in:"
-        echo >&2 "https://github.com/apache/airflow/blob/master/CONTRIBUTING.md"
+        echo >&2 "https://github.com/apache/airflow/blob/master/CONTRIBUTING.rst"
         echo >&2
         exit 1
     fi
@@ -121,58 +121,56 @@ function in_container_basic_sanity_check() {
     in_container_cleanup_pycache
 }
 
-function in_container_refresh_pylint_todo() {
-    print_in_container_info
-    print_in_container_info "Refreshing list of all  non-pylint compliant files. This can take some time."
-    print_in_container_info
+export DISABLE_CHECKS_FOR_TESTS="missing-docstring,no-self-use,too-many-public-methods,protected-access"
 
-    print_in_container_info
-    print_in_container_info "Finding list  all non-pylint compliant files everywhere except 'tests' folder"
-    print_in_container_info
+function start_output_heartbeat() {
+    MESSAGE=${1:="Still working!"}
+    INTERVAL=${2:=10}
+    echo
+    echo "Starting output heartbeat"
+    echo
 
-    # Using path -prune is much better in the local environment on OSX because we have host
-    # Files mounted and node_modules is a huge directory which takes many seconds to even scan
-    # -prune works better than -not path because it skips traversing the whole directory. -not path traverses
-    # the directory and only excludes it after all of it is scanned
-    find . \
-        -path "./airflow/www/node_modules" -prune -o \
-        -path "./airflow/www_rbac/node_modules" -prune -o \
-        -path "./airflow/_vendor" -prune -o \
-        -path "./airflow/migrations/versions" -prune -o \
-        -path "./.eggs" -prune -o \
-        -path "./docs/_build" -prune -o \
-        -path "./build" -prune -o \
-        -path "./tests" -prune -o \
-        -name "*.py" \
-        -not -name 'webserver_config.py' | \
-        grep  ".*.py$" | \
-        xargs pylint | tee "${MY_DIR}/../pylint_todo_main.txt"
-
-    grep -v "\*\*" < "${MY_DIR}/../pylint_todo_main.txt" | \
-       grep -v "^$" | grep -v "\-\-\-" | grep -v "^Your code has been" | \
-       awk 'FS=":" {print "./"$1}' | sort | uniq > "${MY_DIR}/../pylint_todo_new.txt"
-
-    print_in_container_info
-    print_in_container_info "So far found $(wc -l <"${MY_DIR}/../pylint_todo_new.txt") files"
-    print_in_container_info
-
-    print_in_container_info
-    print_in_container_info "Finding list of all non-pylint compliant files in 'tests' folder"
-    print_in_container_info
-
-    find "./tests" -name "*.py" -print0 | \
-        xargs -0 pylint --disable="${DISABLE_CHECKS_FOR_TESTS}" | tee "${MY_DIR}/../pylint_todo_tests.txt"
-
-    grep -v "\*\*" < "${MY_DIR}/../pylint_todo_tests.txt" | \
-        grep -v "^$" | grep -v "\-\-\-" | grep -v "^Your code has been" | \
-        awk 'FS=":" {print "./"$1}' | sort | uniq >> "${MY_DIR}/../pylint_todo_new.txt"
-
-    rm -fv "${MY_DIR}/../pylint_todo_main.txt" "${MY_DIR}/../pylint_todo_tests.txt"
-    mv -v "${MY_DIR}/../pylint_todo_new.txt" "${MY_DIR}/../pylint_todo.txt"
-
-    print_in_container_info
-    print_in_container_info "Found $(wc -l <"${MY_DIR}/../pylint_todo.txt") files"
-    print_in_container_info
+    bash 2> /dev/null <<EOF &
+while true; do
+  echo "\$(date): ${MESSAGE} "
+  sleep ${INTERVAL}
+done
+EOF
+    export HEARTBEAT_PID=$!
 }
 
-export DISABLE_CHECKS_FOR_TESTS="missing-docstring,no-self-use,too-many-public-methods,protected-access"
+function stop_output_heartbeat() {
+    kill "${HEARTBEAT_PID}"
+    wait "${HEARTBEAT_PID}" || true 2> /dev/null
+}
+
+function setup_kerberos() {
+    FQDN=$(hostname)
+    ADMIN="admin"
+    PASS="airflow"
+    KRB5_KTNAME=/etc/airflow.keytab
+
+    sudo cp "${MY_DIR}/krb5/krb5.conf" /etc/krb5.conf
+
+    echo -e "${PASS}\n${PASS}" | \
+        sudo kadmin -p "${ADMIN}/admin" -w "${PASS}" -q "addprinc -randkey airflow/${FQDN}" 2>&1 \
+          | sudo tee "${AIRFLOW_HOME}/logs/kadmin_1.log" >/dev/null
+    RES_1=$?
+
+    sudo kadmin -p "${ADMIN}/admin" -w "${PASS}" -q "ktadd -k ${KRB5_KTNAME} airflow" 2>&1 \
+          | sudo tee "${AIRFLOW_HOME}/logs/kadmin_2.log" >/dev/null
+    RES_2=$?
+
+    sudo kadmin -p "${ADMIN}/admin" -w "${PASS}" -q "ktadd -k ${KRB5_KTNAME} airflow/${FQDN}" 2>&1 \
+          | sudo tee "${AIRFLOW_HOME}/logs``/kadmin_3.log" >/dev/null
+    RES_3=$?
+
+    if [[ ${RES_1} != 0 || ${RES_2} != 0 || ${RES_3} != 0 ]]; then
+        exit 1
+    else
+        echo
+        echo "Kerberos enabled and working."
+        echo
+        sudo chmod 0644 "${KRB5_KTNAME}"
+    fi
+}

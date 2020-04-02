@@ -31,16 +31,16 @@ example. Also be aware that it might spin up clusters to run these examples.*
 import filecmp
 import random
 
-import airflow
 from airflow import DAG
 from airflow.contrib.operators.qubole_operator import QuboleOperator
 from airflow.operators.dummy_operator import DummyOperator
-from airflow.operators.python_operator import PythonOperator, BranchPythonOperator
+from airflow.operators.python_operator import BranchPythonOperator, PythonOperator
+from airflow.utils.dates import days_ago
 
 default_args = {
     'owner': 'Airflow',
     'depends_on_past': False,
-    'start_date': airflow.utils.dates.days_ago(2),
+    'start_date': days_ago(2),
     'email': ['airflow@example.com'],
     'email_on_failure': False,
     'email_on_retry': False
@@ -87,7 +87,7 @@ with DAG(
         task_id='hive_s3_location',
         command_type="hivecmd",
         script_location="s3n://public-qubole/qbol-library/scripts/show_table.hql",
-        notfiy=True,
+        notify=True,
         tags=['tag1', 'tag2'],
         # If the script at s3 location has any qubole specific macros to be replaced
         # macros='[{"date": "{{ ds }}"}, {"name" : "abc"}]',
@@ -189,7 +189,7 @@ with DAG(
         hive_table='default_qubole_airline_origin_destination',
         db_table='exported_airline_origin_destination',
         where_clause='id < 10',
-        db_parallelism=2,
+        parallelism=2,
         dbtap_id=2064,
         trigger_rule="all_done"
     )

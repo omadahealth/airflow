@@ -94,8 +94,8 @@ def clear_task_instances(tis,
                 # Ignore errors when updating max_tries if dag is None or
                 # task not found in dag since database records could be
                 # outdated. We make max_tries the maximum value of its
-                # original max_tries or the current task try number.
-                ti.max_tries = max(ti.max_tries, ti.try_number - 1)
+                # original max_tries or the last attempted try number.
+                ti.max_tries = max(ti.max_tries, ti.prev_attempted_tries)
             ti.state = State.NONE
             session.merge(ti)
         # Clear all reschedules related to the ti to clear
@@ -158,6 +158,8 @@ class TaskInstance(Base, LoggingMixin):
     queued_dttm = Column(UtcDateTime)
     pid = Column(Integer)
     executor_config = Column(PickleType(pickler=dill))
+    # If adding new fields here then remember to add them to
+    # refresh_from_db() or they wont display in the UI correctly
 
     __table_args__ = (
         Index('ti_dag_state', dag_id, state),
@@ -216,7 +218,7 @@ class TaskInstance(Base, LoggingMixin):
         run.
 
         If the TI is currently running, this will match the column in the
-        databse, in all othercases this will be incremenetd
+        database, in all other cases this will be incremented.
         """
         # This is designed so that task logs end up in the right file.
         if self.state == State.RUNNING:
@@ -226,6 +228,20 @@ class TaskInstance(Base, LoggingMixin):
     @try_number.setter
     def try_number(self, value):
         self._try_number = value
+
+    @property
+    def prev_attempted_tries(self):
+        """
+        Based on this instance's try_number, this will calculate
+        the number of previously attempted tries, defaulting to 0.
+        """
+        # Expose this for the Task Tries and Gantt graph views.
+        # Using `try_number` throws off the counts for non-running tasks.
+        # Also useful in error logging contexts to get
+        # the try number for the last try that was attempted.
+        # https://issues.apache.org/jira/browse/AIRFLOW-2143
+
+        return self._try_number
 
     @property
     def next_try_number(self):
@@ -460,14 +476,23 @@ class TaskInstance(Base, LoggingMixin):
         else:
             ti = qry.first()
         if ti:
-            self.state = ti.state
+            # Fields ordered per model definition
             self.start_date = ti.start_date
             self.end_date = ti.end_date
+            self.duration = ti.duration
+            self.state = ti.state
             # Get the raw value of try_number column, don't read through the
             # accessor here otherwise it will be incremeneted by one already.
             self.try_number = ti._try_number
             self.max_tries = ti.max_tries
             self.hostname = ti.hostname
+            self.unixname = ti.unixname
+            self.job_id = ti.job_id
+            self.pool = ti.pool
+            self.queue = ti.queue
+            self.priority_weight = ti.priority_weight
+            self.operator = ti.operator
+            self.queued_dttm = ti.queued_dttm
             self.pid = ti.pid
             if refresh_executor_config:
                 self.executor_config = ti.executor_config
@@ -884,6 +909,8 @@ class TaskInstance(Base, LoggingMixin):
         :param pool: specifies the pool to use to run the task instance
         :type pool: str
         """
+        from airflow.sensors.base_sensor_operator import BaseSensorOperator
+
         task = self.task
         self.pool = pool or task.pool
         self.test_mode = test_mode
@@ -899,6 +926,15 @@ class TaskInstance(Base, LoggingMixin):
                 context = self.get_template_context()
 
                 task_copy = copy.copy(task)
+
+                # Sensors in `poke` mode can block execution of DAGs when running
+                # with single process executor, thus we change the mode to`reschedule`
+                # to allow parallel task being scheduled and executed
+                if isinstance(task_copy, BaseSensorOperator) and \
+                        conf.get('core', 'executor') == "DebugExecutor":
+                    self.log.warning("DebugExecutor changes sensor mode to 'reschedule'.")
+                    task_copy.mode = 'reschedule'
+
                 self.task = task_copy
 
                 def signal_handler(signum, frame):
@@ -949,11 +985,26 @@ class TaskInstance(Base, LoggingMixin):
             self.refresh_from_db(lock_for_update=True)
             self.state = State.SUCCESS
         except AirflowSkipException as e:
+            # Recording SKIP
             # log only if exception has any arguments to prevent log flooding
             if e.args:
                 self.log.info(e)
             self.refresh_from_db(lock_for_update=True)
             self.state = State.SKIPPED
+            self.log.info(
+                'Marking task as SKIPPED.'
+                'dag_id=%s, task_id=%s, execution_date=%s, start_date=%s, end_date=%s',
+                self.dag_id,
+                self.task_id,
+                self.execution_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                    self,
+                    'execution_date') and self.execution_date else '',
+                self.start_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                    self,
+                    'start_date') and self.start_date else '',
+                self.end_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                    self,
+                    'end_date') and self.end_date else '')
         except AirflowRescheduleException as reschedule_exception:
             self.refresh_from_db()
             self._handle_reschedule(actual_start_date, reschedule_exception, test_mode, context)
@@ -981,6 +1032,20 @@ class TaskInstance(Base, LoggingMixin):
 
         # Recording SUCCESS
         self.end_date = timezone.utcnow()
+        self.log.info(
+            'Marking task as SUCCESS.'
+            'dag_id=%s, task_id=%s, execution_date=%s, start_date=%s, end_date=%s',
+            self.dag_id,
+            self.task_id,
+            self.execution_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                self,
+                'execution_date') and self.execution_date else '',
+            self.start_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                self,
+                'start_date') and self.start_date else '',
+            self.end_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                self,
+                'end_date') and self.end_date else '')
         self.set_duration()
         if not test_mode:
             session.add(Log(self.state, self))
@@ -1054,7 +1119,12 @@ class TaskInstance(Base, LoggingMixin):
         self.log.info('Rescheduling task, marking task as UP_FOR_RESCHEDULE')
 
     @provide_session
-    def handle_failure(self, error, test_mode=False, context=None, session=None):
+    def handle_failure(self, error, test_mode=None, context=None, session=None):
+        if test_mode is None:
+            test_mode = self.test_mode
+        if context is None:
+            context = self.get_template_context()
+
         self.log.exception(error)
         task = self.task
         self.end_date = timezone.utcnow()
@@ -1084,9 +1154,35 @@ class TaskInstance(Base, LoggingMixin):
             else:
                 self.state = State.FAILED
                 if task.retries:
-                    self.log.info('All retries failed; marking task as FAILED')
+                    self.log.info(
+                        'All retries failed; marking task as FAILED.'
+                        'dag_id=%s, task_id=%s, execution_date=%s, start_date=%s, end_date=%s',
+                        self.dag_id,
+                        self.task_id,
+                        self.execution_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                            self,
+                            'execution_date') and self.execution_date else '',
+                        self.start_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                            self,
+                            'start_date') and self.start_date else '',
+                        self.end_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                            self,
+                            'end_date') and self.end_date else '')
                 else:
-                    self.log.info('Marking task as FAILED.')
+                    self.log.info(
+                        'Marking task as FAILED.'
+                        'dag_id=%s, task_id=%s, execution_date=%s, start_date=%s, end_date=%s',
+                        self.dag_id,
+                        self.task_id,
+                        self.execution_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                            self,
+                            'execution_date') and self.execution_date else '',
+                        self.start_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                            self,
+                            'start_date') and self.start_date else '',
+                        self.end_date.strftime('%Y%m%dT%H%M%S') if hasattr(
+                            self,
+                            'end_date') and self.end_date else '')
                 if task.email_on_failure and task.email:
                     self.email_alert(error)
         except Exception as e2:
@@ -1184,33 +1280,55 @@ class TaskInstance(Base, LoggingMixin):
 
         class VariableAccessor:
             """
-            Wrapper around Variable. This way you can get variables in templates by using
-            {var.value.your_variable_name}.
+            Wrapper around Variable. This way you can get variables in
+            templates by using ``{{ var.value.variable_name }}`` or
+            ``{{ var.value.get('variable_name', 'fallback') }}``.
             """
             def __init__(self):
                 self.var = None
 
-            def __getattr__(self, item):
+            def __getattr__(
+                self,
+                item,
+            ):
                 self.var = Variable.get(item)
                 return self.var
 
             def __repr__(self):
                 return str(self.var)
 
+            @staticmethod
+            def get(
+                item,
+                default_var=Variable._Variable__NO_DEFAULT_SENTINEL,
+            ):
+                return Variable.get(item, default_var=default_var)
+
         class VariableJsonAccessor:
             """
-            Wrapper around deserialized Variables. This way you can get variables
-            in templates by using {var.json.your_variable_name}.
+            Wrapper around Variable. This way you can get variables in
+            templates by using ``{{ var.json.variable_name }}`` or
+            ``{{ var.json.get('variable_name', {'fall': 'back'}) }}``.
             """
             def __init__(self):
                 self.var = None
 
-            def __getattr__(self, item):
+            def __getattr__(
+                self,
+                item,
+            ):
                 self.var = Variable.get(item, deserialize_json=True)
                 return self.var
 
             def __repr__(self):
                 return str(self.var)
+
+            @staticmethod
+            def get(
+                item,
+                default_var=Variable._Variable__NO_DEFAULT_SENTINEL,
+            ):
+                return Variable.get(item, default_var=default_var, deserialize_json=True)
 
         return {
             'conf': conf,
@@ -1270,11 +1388,11 @@ class TaskInstance(Base, LoggingMixin):
         exception_html = str(exception).replace('\n', '<br>')
         jinja_context = self.get_template_context()
         # This function is called after changing the state
-        # from State.RUNNING so need to subtract 1 from self.try_number.
+        # from State.RUNNING so use prev_attempted_tries.
         jinja_context.update(dict(
             exception=exception,
             exception_html=exception_html,
-            try_number=self.try_number - 1,
+            try_number=self.prev_attempted_tries,
             max_tries=self.max_tries))
 
         jinja_env = self.task.get_template_env()
@@ -1292,6 +1410,15 @@ class TaskInstance(Base, LoggingMixin):
             'Mark success: <a href="{{ti.mark_success_url}}">Link</a><br>'
         )
 
+        default_html_content_err = (
+            'Try {{try_number}} out of {{max_tries + 1}}<br>'
+            'Exception:<br>Failed attempt to attach error logs<br>'
+            'Log: <a href="{{ti.log_url}}">Link</a><br>'
+            'Host: {{ti.hostname}}<br>'
+            'Log file: {{ti.log_filepath}}<br>'
+            'Mark success: <a href="{{ti.mark_success_url}}">Link</a><br>'
+        )
+
         def render(key, content):
             if conf.has_option('email', key):
                 path = conf.get('email', key)
@@ -1302,7 +1429,11 @@ class TaskInstance(Base, LoggingMixin):
 
         subject = render('subject_template', default_subject)
         html_content = render('html_content_template', default_html_content)
-        send_email(self.task.email, subject, html_content)
+        html_content_err = render('html_content_template', default_html_content_err)
+        try:
+            send_email(self.task.email, subject, html_content)
+        except Exception:
+            send_email(self.task.email, subject, html_content_err)
 
     def set_duration(self):
         if self.end_date and self.start_date:
@@ -1396,11 +1527,12 @@ class TaskInstance(Base, LoggingMixin):
     @provide_session
     def get_num_running_task_instances(self, session):
         TI = TaskInstance
-        return session.query(TI).filter(
+        # .count() is inefficient
+        return session.query(func.count()).filter(
             TI.dag_id == self.dag_id,
             TI.task_id == self.task_id,
             TI.state == State.RUNNING
-        ).count()
+        ).scalar()
 
     def init_run_context(self, raw=False):
         """

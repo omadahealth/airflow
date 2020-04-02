@@ -85,6 +85,7 @@ Content
     profiling
     cli
     scheduler
+    executor/index
     plugins
     security
     timezone
@@ -94,10 +95,11 @@ Content
     errors
     kubernetes
     lineage
+    dag-serialization
     changelog
+    best-practices
     faq
     macros
-    _api/index
     privacy_notice
 
 .. toctree::
@@ -105,3 +107,4 @@ Content
     :caption: References
 
     Python API <_api/index>
+    Configurations <configurations-ref>

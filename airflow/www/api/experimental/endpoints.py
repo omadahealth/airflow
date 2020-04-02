@@ -32,6 +32,7 @@ from airflow.api.common.experimental.get_dag_run_state import get_dag_run_state
 from airflow.exceptions import AirflowException
 from airflow.utils import timezone
 from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.utils.strings import to_boolean
 from airflow.www.app import csrf
 from airflow import models
 
@@ -78,8 +79,12 @@ def trigger_dag(dag_id):
 
             return response
 
+    replace_microseconds = (execution_date is None)
+    if 'replace_microseconds' in data:
+        replace_microseconds = to_boolean(data['replace_microseconds'])
+
     try:
-        dr = trigger.trigger_dag(dag_id, run_id, conf, execution_date)
+        dr = trigger.trigger_dag(dag_id, run_id, conf, execution_date, replace_microseconds)
     except AirflowException as err:
         _log.error(err)
         response = jsonify(error="{}".format(err))
@@ -89,7 +94,7 @@ def trigger_dag(dag_id):
     if getattr(g, 'user', None):
         _log.info("User %s created %s", g.user, dr)
 
-    response = jsonify(message="Created {}".format(dr))
+    response = jsonify(message="Created {}".format(dr), execution_date=dr.execution_date.isoformat())
     return response
 
 
@@ -116,9 +121,10 @@ def dag_runs(dag_id):
     """
     Returns a list of Dag Runs for a specific DAG ID.
     :query param state: a query string parameter '?state=queued|running|success...'
+
     :param dag_id: String identifier of a DAG
     :return: List of DAG runs of a DAG with requested state,
-    or all runs if the state is not specified
+        or all runs if the state is not specified
     """
     try:
         state = request.args.get('state')

@@ -210,8 +210,9 @@ class SageMakerHook(AwsHook):
         :type training_config: dict
         :return: None
         """
-        for channel in training_config['InputDataConfig']:
-            self.check_s3_url(channel['DataSource']['S3DataSource']['S3Uri'])
+        if "InputDataConfig" in training_config:
+            for channel in training_config['InputDataConfig']:
+                self.check_s3_url(channel['DataSource']['S3DataSource']['S3Uri'])
 
     def check_tuning_config(self, tuning_config):
         """
@@ -546,7 +547,7 @@ class SageMakerHook(AwsHook):
         Return the tuning job info associated with the name
 
         :param name: the name of the tuning job
-        :type name: string
+        :type name: str
         :return: A dict contains all the tuning job info
         """
 
@@ -557,7 +558,7 @@ class SageMakerHook(AwsHook):
         Return the SageMaker model info associated with the name
 
         :param name: the name of the SageMaker model
-        :type name: string
+        :type name: str
         :return: A dict contains all the model info
         """
 
@@ -568,7 +569,7 @@ class SageMakerHook(AwsHook):
         Return the transform job info associated with the name
 
         :param name: the name of the transform job
-        :type name: string
+        :type name: str
         :return: A dict contains all the transform job info
         """
 
@@ -579,7 +580,7 @@ class SageMakerHook(AwsHook):
         Return the endpoint config info associated with the name
 
         :param name: the name of the endpoint config
-        :type name: string
+        :type name: str
         :return: A dict contains all the endpoint config info
         """
 
@@ -588,7 +589,7 @@ class SageMakerHook(AwsHook):
     def describe_endpoint(self, name):
         """
         :param name: the name of the endpoint
-        :type name: string
+        :type name: str
         :return: A dict contains all the endpoint info
         """
 

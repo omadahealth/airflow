@@ -120,6 +120,9 @@ class DockerOperator(BaseOperator):
     :param shm_size: Size of ``/dev/shm`` in bytes. The size must be
         greater than 0. If omitted uses system default.
     :type shm_size: int
+    :param tty: Allocate pseudo-TTY to the container
+        This needs to be set see logs of the Docker container.
+    :type tty: bool
     """
     template_fields = ('command', 'environment', 'container_name')
     template_ext = ('.sh', '.bash',)
@@ -154,6 +157,7 @@ class DockerOperator(BaseOperator):
             dns_search=None,
             auto_remove=False,
             shm_size=None,
+            tty=False,
             *args,
             **kwargs):
 
@@ -185,6 +189,7 @@ class DockerOperator(BaseOperator):
         self.xcom_all = xcom_all
         self.docker_conn_id = docker_conn_id
         self.shm_size = shm_size
+        self.tty = tty
 
         self.cli = None
         self.container = None
@@ -197,29 +202,13 @@ class DockerOperator(BaseOperator):
             tls=self.__get_tls_config()
         )
 
-    def execute(self, context):
+    def _run_image(self):
+        """
+        Run a Docker container with the provided image
+        """
         self.log.info('Starting docker container from image %s', self.image)
 
-        tls_config = self.__get_tls_config()
-
-        if self.docker_conn_id:
-            self.cli = self.get_hook().get_conn()
-        else:
-            self.cli = APIClient(
-                base_url=self.docker_url,
-                version=self.api_version,
-                tls=tls_config
-            )
-
-        if self.force_pull or len(self.cli.images(name=self.image)) == 0:
-            self.log.info('Pulling docker image %s', self.image)
-            for l in self.cli.pull(self.image, stream=True):
-                output = json.loads(l.decode('utf-8').strip())
-                if 'status' in output:
-                    self.log.info("%s", output['status'])
-
         with TemporaryDirectory(prefix='airflowtmp', dir=self.host_tmp_dir) as host_tmp_dir:
-            self.environment['AIRFLOW_TMP_DIR'] = self.tmp_dir
             self.volumes.append('{0}:{1}'.format(host_tmp_dir, self.tmp_dir))
 
             self.container = self.cli.create_container(
@@ -237,7 +226,8 @@ class DockerOperator(BaseOperator):
                     mem_limit=self.mem_limit),
                 image=self.image,
                 user=self.user,
-                working_dir=self.working_dir
+                working_dir=self.working_dir,
+                tty=self.tty,
             )
             self.cli.start(self.container['Id'])
 
@@ -258,6 +248,31 @@ class DockerOperator(BaseOperator):
             if self.xcom_push_flag:
                 return self.cli.logs(container=self.container['Id']) \
                     if self.xcom_all else str(line)
+
+    def execute(self, context):
+
+        tls_config = self.__get_tls_config()
+
+        if self.docker_conn_id:
+            self.cli = self.get_hook().get_conn()
+        else:
+            self.cli = APIClient(
+                base_url=self.docker_url,
+                version=self.api_version,
+                tls=tls_config
+            )
+
+        # Pull the docker image if `force_pull` is set or image does not exist locally
+        if self.force_pull or len(self.cli.images(name=self.image)) == 0:
+            self.log.info('Pulling docker image %s', self.image)
+            for l in self.cli.pull(self.image, stream=True):
+                output = json.loads(l.decode('utf-8').strip())
+                if 'status' in output:
+                    self.log.info("%s", output['status'])
+
+        self.environment['AIRFLOW_TMP_DIR'] = self.tmp_dir
+
+        return self._run_image()
 
     def get_command(self):
         """

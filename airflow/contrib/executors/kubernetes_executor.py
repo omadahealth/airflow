@@ -185,6 +185,8 @@ class KubeConfig:
         self.git_sync_root = conf.get(self.kubernetes_section, 'git_sync_root')
         # Optionally, the name at which to publish the checked-out files under --root
         self.git_sync_dest = conf.get(self.kubernetes_section, 'git_sync_dest')
+        # Optionally, the tag or hash to checkout
+        self.git_sync_rev = conf.get(self.kubernetes_section, 'git_sync_rev')
         # Optionally, if git_dags_folder_mount_point is set the worker will use
         # {git_dags_folder_mount_point}/{git_sync_dest}/{git_subpath} as dags_folder
         self.git_dags_folder_mount_point = conf.get(self.kubernetes_section,
@@ -258,6 +260,11 @@ class KubeConfig:
         # The worker pod may optionally have a  valid Airflow config loaded via a
         # configmap
         self.airflow_configmap = conf.get(self.kubernetes_section, 'airflow_configmap')
+
+        # The worker pod may optionally have a valid Airflow local settings loaded via a
+        # configmap
+        self.airflow_local_settings_configmap = conf.get(
+            self.kubernetes_section, 'airflow_local_settings_configmap')
 
         affinity_json = conf.get(self.kubernetes_section, 'affinity')
         if affinity_json:
@@ -529,11 +536,11 @@ class AirflowKubernetesScheduler(LoggingMixin):
         """
         Kubernetes pod names must be <= 253 chars and must pass the following regex for
         validation
-        "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+        ``^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$``
 
         :param safe_dag_id: a dag_id with only alphanumeric characters
         :param safe_task_id: a task_id with only alphanumeric characters
-        :param random_uuid: a uuid
+        :param safe_uuid: a uuid
         :return: ``str`` valid Pod name of appropriate length
         """
         safe_key = safe_dag_id + safe_task_id
@@ -590,6 +597,7 @@ class AirflowKubernetesScheduler(LoggingMixin):
         Kubernetes doesn't like ":" in labels, since ISO datetime format uses ":" but
         not "_" let's
         replace ":" with "_"
+
         :param datetime_obj: datetime.datetime object
         :return: ISO-like string representing the datetime
         """
@@ -614,6 +622,27 @@ class AirflowKubernetesScheduler(LoggingMixin):
             return None
 
         with create_session() as session:
+            task = (
+                session
+                .query(TaskInstance)
+                .filter_by(task_id=task_id, dag_id=dag_id, execution_date=ex_time)
+                .one_or_none()
+            )
+            if task:
+                self.log.info(
+                    'Found matching task %s-%s (%s) with current state of %s',
+                    task.dag_id, task.task_id, task.execution_date, task.state
+                )
+                return (dag_id, task_id, ex_time, try_num)
+            else:
+                self.log.warning(
+                    'task_id/dag_id are not safe to use as Kubernetes labels. This can cause '
+                    'severe performance regressions. Please see '
+                    '<https://kubernetes.io/docs/concepts/overview/working-with-objects'
+                    '/labels/#syntax-and-character-set>. '
+                    'Given dag_id: %s, task_id: %s', task_id, dag_id
+                )
+
             tasks = (
                 session
                 .query(TaskInstance)
@@ -856,7 +885,6 @@ class KubernetesExecutor(BaseExecutor, LoggingMixin):
                 self.running.pop(key)
             except KeyError:
                 self.log.debug('Could not find key: %s', str(key))
-                pass
         self.event_buffer[key] = state
 
     def _flush_task_queue(self):

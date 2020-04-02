@@ -17,8 +17,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import unittest
-import warnings
 from tests.compat import MagicMock
 from datetime import datetime
 
@@ -36,10 +34,20 @@ from airflow.contrib.operators.bigquery_table_delete_operator import \
 from airflow.contrib.operators.bigquery_to_bigquery import \
     BigQueryToBigQueryOperator
 from airflow.contrib.operators.bigquery_to_gcs import BigQueryToCloudStorageOperator
+from airflow.contrib.operators.bigquery_to_mysql_operator import BigQueryToMySqlOperator
 from airflow.exceptions import AirflowException
-from airflow.models import DAG, TaskFail, TaskInstance
+from airflow.models import DAG, TaskFail, TaskInstance, XCom
+from airflow.serialization.serialized_objects import SerializedDAG
 from airflow.settings import Session
+from airflow.utils.db import provide_session
 from tests.compat import mock
+
+if six.PY2:
+    # Need `assertWarns` back-ported from unittest2
+    import unittest2 as unittest
+else:
+    import unittest
+
 
 TASK_ID = 'test-bq-create-table-operator'
 TEST_DATASET = 'test-dataset'
@@ -230,14 +238,17 @@ class BigQueryUpdateDatasetOperatorTest(unittest.TestCase):
 
 class BigQueryOperatorTest(unittest.TestCase):
     def test_bql_deprecation_warning(self):
-        with warnings.catch_warnings(record=True) as w:
-            BigQueryOperator(
+        with self.assertWarns(DeprecationWarning) as cm:
+            task = BigQueryOperator(
                 task_id='test_deprecation_warning_for_bql',
                 bql='select * from test_table'
             )
-        self.assertIn(
-            'Deprecated parameter `bql`',
-            w[0].message.args[0])
+        warning = cm.warning
+        assert task, "Task should be created"
+        assert 'Deprecated parameter `bql` used in Task id: test_deprecation_warning_for_bql. ' \
+               'Use `sql` parameter instead to pass the sql to be executed.' \
+               ' `bql` parameter is deprecated and will be removed' \
+               ' in a future version of Airflow.' == warning.args[0]
 
     def setUp(self):
         self.dagbag = models.DagBag(
@@ -447,14 +458,32 @@ class BigQueryOperatorTest(unittest.TestCase):
         ti.render_templates()
         self.assertTrue(isinstance(ti.task.sql, six.string_types))
 
+    @provide_session
     @mock.patch('airflow.contrib.operators.bigquery_operator.BigQueryHook')
-    def test_bigquery_operator_extra_link(self, mock_hook):
+    def test_bigquery_operator_extra_link_when_missing_job_id(self, mock_hook, session):
         bigquery_task = BigQueryOperator(
             task_id=TASK_ID,
             sql='SELECT * FROM test_table',
             dag=self.dag,
         )
         self.dag.clear()
+        session.query(XCom).delete()
+
+        self.assertEqual(
+            '',
+            bigquery_task.get_extra_links(DEFAULT_DATE, BigQueryConsoleLink.name),
+        )
+
+    @provide_session
+    @mock.patch('airflow.contrib.operators.bigquery_operator.BigQueryHook')
+    def test_bigquery_operator_extra_link_when_single_query(self, mock_hook, session):
+        bigquery_task = BigQueryOperator(
+            task_id=TASK_ID,
+            sql='SELECT * FROM test_table',
+            dag=self.dag,
+        )
+        self.dag.clear()
+        session.query(XCom).delete()
 
         ti = TaskInstance(
             task=bigquery_task,
@@ -473,6 +502,77 @@ class BigQueryOperatorTest(unittest.TestCase):
             '',
             bigquery_task.get_extra_links(datetime(2019, 1, 1), BigQueryConsoleLink.name),
         )
+
+    @provide_session
+    @mock.patch('airflow.contrib.operators.bigquery_operator.BigQueryHook')
+    def test_bigquery_operator_extra_link_when_multiple_query(self, mock_hook, session):
+        bigquery_task = BigQueryOperator(
+            task_id=TASK_ID,
+            sql=['SELECT * FROM test_table', 'SELECT * FROM test_table2'],
+            dag=self.dag,
+        )
+        self.dag.clear()
+        session.query(XCom).delete()
+
+        ti = TaskInstance(
+            task=bigquery_task,
+            execution_date=DEFAULT_DATE,
+        )
+
+        job_id = ['123', '45']
+        ti.xcom_push(key='job_id', value=job_id)
+
+        six.assertCountEqual(
+            self, {'BigQuery Console #1', 'BigQuery Console #2'},
+            bigquery_task.operator_extra_link_dict.keys()
+        )
+
+        self.assertEqual(
+            'https://console.cloud.google.com/bigquery?j=123',
+            bigquery_task.get_extra_links(DEFAULT_DATE, 'BigQuery Console #1'),
+        )
+
+        self.assertEqual(
+            'https://console.cloud.google.com/bigquery?j=45',
+            bigquery_task.get_extra_links(DEFAULT_DATE, 'BigQuery Console #2'),
+        )
+
+    def test_bigquery_operator_extra_serialized_field_when_single_query(self):
+        with self.dag:
+            BigQueryOperator(
+                task_id=TASK_ID,
+                sql='SELECT * FROM test_table',
+            )
+        serialized_dag = SerializedDAG.to_dict(self.dag)
+        self.assertIn("sql", serialized_dag["dag"]["tasks"][0])
+
+        dag = SerializedDAG.from_dict(serialized_dag)
+        simple_task = dag.task_dict[TASK_ID]
+        self.assertEqual(getattr(simple_task, "sql"), 'SELECT * FROM test_table')
+
+        #########################################################
+        # Verify Operator Links work with Serialized Operator
+        #########################################################
+
+        # Check Serialized version of operator link
+        self.assertEqual(
+            serialized_dag["dag"]["tasks"][0]["_operator_extra_links"],
+            [{'airflow.contrib.operators.bigquery_operator.BigQueryConsoleLink': {}}]
+        )
+
+        # Check DeSerialized version of operator link
+        self.assertIsInstance(list(simple_task.operator_extra_links)[0], BigQueryConsoleLink)
+
+        ti = TaskInstance(task=simple_task, execution_date=DEFAULT_DATE)
+        ti.xcom_push('job_id', 12345)
+
+        # check for positive case
+        url = simple_task.get_extra_links(DEFAULT_DATE, BigQueryConsoleLink.name)
+        self.assertEqual(url, 'https://console.cloud.google.com/bigquery?j=12345')
+
+        # check for negative case
+        url2 = simple_task.get_extra_links(datetime(2017, 1, 2), BigQueryConsoleLink.name)
+        self.assertEqual(url2, '')
 
 
 class BigQueryGetDataOperatorTest(unittest.TestCase):
@@ -597,4 +697,29 @@ class BigQueryToCloudStorageOperatorTest(unittest.TestCase):
                 field_delimiter=field_delimiter,
                 print_header=print_header,
                 labels=labels
+            )
+
+
+class BigQueryToMySqlOperatorTest(unittest.TestCase):
+    @mock.patch('airflow.contrib.operators.bigquery_to_mysql_operator.BigQueryHook')
+    def test_execute_good_request_to_bq(self, mock_hook):
+        destination_table = 'table'
+        operator = BigQueryToMySqlOperator(
+            task_id=TASK_ID,
+            dataset_table='{}.{}'.format(TEST_DATASET, TEST_TABLE_ID),
+            mysql_table=destination_table,
+            replace=False,
+        )
+
+        operator.execute(None)
+        mock_hook.return_value \
+            .get_conn.return_value \
+            .cursor.return_value \
+            .get_tabledata \
+            .assert_called_once_with(
+                dataset_id=TEST_DATASET,
+                table_id=TEST_TABLE_ID,
+                max_results=1000,
+                selected_fields=None,
+                start_index=0
             )

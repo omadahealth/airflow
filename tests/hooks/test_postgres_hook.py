@@ -23,6 +23,9 @@ import unittest
 
 from tempfile import NamedTemporaryFile
 
+import psycopg2.extras
+import pytest
+
 from airflow.hooks.postgres_hook import PostgresHook
 from airflow.models import Connection
 
@@ -60,6 +63,20 @@ class TestPostgresHookConn(unittest.TestCase):
         self.db_hook.get_conn()
         mock_connect.assert_called_once_with(user='login', password='password', host='host',
                                              dbname='schema', port=None)
+
+    @mock.patch('airflow.hooks.postgres_hook.psycopg2.connect')
+    def test_get_conn_cursor(self, mock_connect):
+        self.connection.extra = '{"cursor": "dictcursor"}'
+        self.db_hook.get_conn()
+        mock_connect.assert_called_once_with(cursor_factory=psycopg2.extras.DictCursor,
+                                             user='login', password='password', host='host',
+                                             dbname='schema', port=None)
+
+    @mock.patch('airflow.hooks.postgres_hook.psycopg2.connect')
+    def test_get_conn_with_invalid_cursor(self, mock_connect):
+        self.connection.extra = '{"cursor": "mycursor"}'
+        with self.assertRaises(ValueError):
+            self.db_hook.get_conn()
 
     @mock.patch('airflow.hooks.postgres_hook.psycopg2.connect')
     @mock.patch('airflow.contrib.hooks.aws_hook.AwsHook.get_client_type')
@@ -111,6 +128,7 @@ class TestPostgresHook(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute("DROP TABLE IF EXISTS {}".format(self.table))
 
+    @pytest.mark.backend("postgres")
     def test_copy_expert(self):
         m = mock.mock_open(read_data='{"some": "json"}')
         with mock.patch('airflow.hooks.postgres_hook.open', m):
@@ -127,6 +145,7 @@ class TestPostgresHook(unittest.TestCase):
             self.cur.copy_expert.assert_called_once_with(statement, m.return_value)
             self.assertEqual(m.call_args[0], (filename, "r+"))
 
+    @pytest.mark.backend("postgres")
     def test_bulk_load(self):
         hook = PostgresHook()
         input_data = ["foo", "bar", "baz"]
@@ -146,6 +165,7 @@ class TestPostgresHook(unittest.TestCase):
 
         self.assertEqual(sorted(input_data), sorted(results))
 
+    @pytest.mark.backend("postgres")
     def test_bulk_dump(self):
         hook = PostgresHook()
         input_data = ["foo", "bar", "baz"]

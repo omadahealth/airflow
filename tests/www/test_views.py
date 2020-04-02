@@ -19,14 +19,16 @@
 
 import io
 import copy
+import json
 import logging.config
-import mock
+import sys
+
 import os
 import shutil
+import pytest
 import tempfile
 import unittest
-import sys
-import json
+from tests.compat import mock
 
 from six.moves.urllib.parse import quote_plus
 from werkzeug.test import Client
@@ -857,18 +859,23 @@ class TestDeleteDag(unittest.TestCase):
         # The delete-dag URL should be generated correctly for DAGs
         # that exist on the scheduler (DB) but not the webserver DagBag
 
+        dag_id = 'example_bash_operator'
         test_dag_id = "non_existent_dag"
 
         session = Session()
         DM = models.DagModel
-        session.query(DM).filter(DM.dag_id == 'example_bash_operator').update({'dag_id': test_dag_id})
+        dag_query = session.query(DM).filter(DM.dag_id == dag_id)
+        dag_query.first().tags = []  # To avoid "FOREIGN KEY constraint" error
+        session.commit()
+
+        dag_query.update({'dag_id': test_dag_id})
         session.commit()
 
         resp = self.app.get('/', follow_redirects=True)
         self.assertIn('/delete?dag_id={}'.format(test_dag_id), resp.data.decode('utf-8'))
         self.assertIn("return confirmDeleteDag(this, '{}')".format(test_dag_id), resp.data.decode('utf-8'))
 
-        session.query(DM).filter(DM.dag_id == test_dag_id).update({'dag_id': 'example_bash_operator'})
+        session.query(DM).filter(DM.dag_id == test_dag_id).update({'dag_id': dag_id})
         session.commit()
 
 
@@ -886,6 +893,7 @@ class TestTriggerDag(unittest.TestCase):
         self.assertIn('/trigger?dag_id=example_bash_operator', resp.data.decode('utf-8'))
         self.assertIn("return confirmDeleteDag(this, 'example_bash_operator')", resp.data.decode('utf-8'))
 
+    @pytest.mark.xfail(condition=True, reason="This test might be flaky on mysql")
     def test_trigger_dag_button(self):
 
         test_dag_id = "example_bash_operator"
@@ -1073,6 +1081,46 @@ class TestDagModelView(unittest.TestCase):
 
         self.assertEqual(dm.description, "Set in tests")
         self.assertNotEqual(dm.fileloc, "/etc/passwd", "Disabled fields shouldn't be updated")
+
+
+class TestTaskStats(unittest.TestCase):
+
+    def setUp(self):
+        app = application.create_app(testing=True)
+        app.config['WTF_CSRF_METHODS'] = []
+        self.app = app.test_client()
+
+        models.DagBag().get_dag("example_bash_operator").sync_to_db()
+        models.DagBag().get_dag("example_subdag_operator").sync_to_db()
+        models.DagBag().get_dag('example_xcom').sync_to_db()
+
+    def test_all_dags(self):
+        resp = self.app.get('/admin/airflow/task_stats', follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        stats = json.loads(resp.data.decode('utf-8'))
+        self.assertIn('example_bash_operator', stats)
+        self.assertIn('example_xcom', stats)
+
+    def test_selected_dags(self):
+        resp = self.app.get(
+            '/admin/airflow/task_stats?dag_ids=example_xcom',
+            follow_redirects=True)
+
+        self.assertEqual(resp.status_code, 200)
+        stats = json.loads(resp.data.decode('utf-8'))
+        self.assertNotIn('example_bash_operator', stats)
+        self.assertIn('example_xcom', stats)
+
+        # Multiple
+        resp = self.app.get(
+            '/admin/airflow/task_stats?dag_ids=example_xcom,example_bash_operator',
+            follow_redirects=True)
+
+        self.assertEqual(resp.status_code, 200)
+        stats = json.loads(resp.data.decode('utf-8'))
+        self.assertIn('example_bash_operator', stats)
+        self.assertIn('example_xcom', stats)
+        self.assertNotIn('example_subdag_operator', stats)
 
 
 if __name__ == '__main__':

@@ -37,6 +37,7 @@ from airflow.models import DAG, DagModel, TaskInstance as TI
 from airflow.operators.dummy_operator import DummyOperator
 from airflow.operators.subdag_operator import SubDagOperator
 from airflow.utils import timezone
+from airflow.utils.dag_processing import list_py_file_paths
 from airflow.utils.state import State
 from airflow.utils.weight_rule import WeightRule
 from tests.models import DEFAULT_DATE
@@ -860,6 +861,30 @@ class DagTest(unittest.TestCase):
         # Since the dag didn't exist before, it should follow the pause flag upon creation
         self.assertTrue(orm_dag.is_paused)
 
+    def test_dag_is_deactivated_upon_dagfile_deletion(self):
+        dag_id = 'old_existing_dag'
+        dag_fileloc = "/usr/local/airflow/dags/non_existing_path.py"
+        dag = DAG(
+            dag_id,
+            is_paused_upon_creation=True,
+        )
+        dag.fileloc = dag_fileloc
+        session = settings.Session()
+        dag.sync_to_db(session=session)
+
+        orm_dag = session.query(DagModel).filter(DagModel.dag_id == dag_id).one()
+
+        self.assertTrue(orm_dag.is_active)
+        self.assertEqual(orm_dag.fileloc, dag_fileloc)
+
+        DagModel.deactivate_deleted_dags(list_py_file_paths(settings.DAGS_FOLDER))
+
+        orm_dag = session.query(DagModel).filter(DagModel.dag_id == dag_id).one()
+        self.assertFalse(orm_dag.is_active)
+
+        # CleanUp
+        session.execute(DagModel.__table__.delete().where(DagModel.dag_id == dag_id))
+
     def test_dag_naive_default_args_start_date_with_timezone(self):
         local_tz = pendulum.timezone('Europe/Zurich')
         default_args = {'start_date': datetime.datetime(2018, 1, 1, tzinfo=local_tz)}
@@ -910,3 +935,14 @@ class DagTest(unittest.TestCase):
             self.assertIn('t1', stdout_lines[0])
             self.assertIn('t2', stdout_lines[1])
             self.assertIn('t3', stdout_lines[2])
+
+    def test_sub_dag_updates_all_references_while_deepcopy(self):
+        with DAG("test_dag", start_date=DEFAULT_DATE) as dag:
+            t1 = DummyOperator(task_id='t1')
+            t2 = DummyOperator(task_id='t2')
+            t3 = DummyOperator(task_id='t3')
+            t1 >> t2
+            t2 >> t3
+
+        sub_dag = dag.sub_dag('t2', include_upstream=True, include_downstream=False)
+        self.assertEqual(id(sub_dag.task_dict['t1'].downstream_list[0].dag), id(sub_dag))

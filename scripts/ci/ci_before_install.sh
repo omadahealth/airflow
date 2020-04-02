@@ -29,13 +29,9 @@ script_start
 
 build_image_on_ci
 
-KUBERNETES_VERSION=${KUBERNETES_VERSION:=""}
-# Required for K8s v1.10.x. See
-# https://github.com/kubernetes/kubernetes/issues/61058#issuecomment-372764783
-if [[ "${KUBERNETES_VERSION}" == "" ]]; then
-    sudo mount --make-shared /
-    sudo service docker restart
-fi
+KUBERNETES_MODE=${KUBERNETES_MODE:=""}
+
+mkdir -p "${AIRFLOW_SOURCES}/files"
 
 sudo pip install pre-commit
 

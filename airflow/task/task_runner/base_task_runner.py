@@ -24,11 +24,10 @@ import os
 import subprocess
 import threading
 
-from airflow.utils.log.logging_mixin import LoggingMixin
-
 from airflow.configuration import conf
 from airflow.utils.configuration import tmp_configuration_copy
-
+from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.utils.net import get_hostname
 
 PYTHONPATH_VAR = 'PYTHONPATH'
 
@@ -37,14 +36,13 @@ class BaseTaskRunner(LoggingMixin):
     """
     Runs Airflow task instances by invoking the `airflow run` command with raw
     mode enabled in a subprocess.
+
+    :param local_task_job: The local task job associated with running the
+        associated task instance.
+    :type local_task_job: airflow.jobs.LocalTaskJob
     """
 
     def __init__(self, local_task_job):
-        """
-        :param local_task_job: The local task job associated with running the
-        associated task instance.
-        :type local_task_job: airflow.jobs.LocalTaskJob
-        """
         # Pass task instance context into log handlers to setup the logger.
         super(BaseTaskRunner, self).__init__(local_task_job.task_instance)
         self._task_instance = local_task_job.task_instance
@@ -130,6 +128,7 @@ class BaseTaskRunner(LoggingMixin):
         cmd = [" ".join(self._command)] if join_args else self._command
         full_cmd = run_with + cmd
 
+        self.log.info("Running on host: %s", get_hostname())
         self.log.info('Running: %s', full_cmd)
         proc = subprocess.Popen(
             full_cmd,
